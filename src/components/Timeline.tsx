@@ -1,9 +1,8 @@
 import { minutesToTime } from "@/lib/availability";
-import type { Booking } from "@/lib/availability";
 
 interface TimelineProps {
   now: number;
-  existingBookings: Booking[];
+  existingBookings: [number, number][];
   candidate: { start: number; end: number } | null;
   available: boolean | null;
 }
@@ -26,12 +25,12 @@ export default function Timeline({
   return (
     <div className="w-full">
       <div className="relative h-14 rounded-xl bg-slate-100 ring-1 ring-slate-200 overflow-hidden">
-        {existingBookings.map((b, i) => (
+        {existingBookings.map(([bStart, bEnd], i) => (
           <div
             key={i}
             className="absolute top-0 bottom-0 bg-slate-300"
-            style={{ left: pct(b.start), width: `${((b.end - b.start) / SPAN) * 100}%` }}
-            title={`Booked ${minutesToTime(b.start)}–${minutesToTime(b.end)}`}
+            style={{ left: pct(bStart), width: `${((bEnd - bStart) / SPAN) * 100}%` }}
+            title={`Booked ${minutesToTime(bStart)}–${minutesToTime(bEnd)}`}
           />
         ))}
 

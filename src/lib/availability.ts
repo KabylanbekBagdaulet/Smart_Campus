@@ -1,19 +1,15 @@
-export interface Booking {
-  start: number;
-  end: number;
+import { MAX_DURATION, NOW, type Room } from "./rooms";
+
+export interface CheckRow {
+  label: string;
+  passed: boolean;
+  detail: string;
 }
 
-export interface AvailabilityConfig {
-  now: number;
-  blocked: boolean;
-  maxDuration: number;
-  existingBookings: Booking[];
-}
-
-export interface AvailabilityResult {
-  available: boolean;
+export interface Evaluation {
+  verdict: boolean; // true => Available, false => Unavailable
   reason: string;
-  checks: { label: string; passed: boolean; detail: string }[];
+  checks: CheckRow[];
 }
 
 export function parseTimeToMinutes(hhmm: string): number | null {
@@ -31,65 +27,64 @@ export function minutesToTime(min: number): string {
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
 }
 
-export function isOverlap(a: Booking, b: Booking): boolean {
-  return a.start < b.end && b.start < a.end;
+function isOverlap(aStart: number, aEnd: number, bStart: number, bEnd: number): boolean {
+  return aStart < bEnd && bStart < aEnd;
 }
 
-export function checkAvailability(
-  startRaw: number,
-  endRaw: number,
-  config: AvailabilityConfig,
-): AvailabilityResult {
-  const checks: AvailabilityResult["checks"] = [];
+/**
+ * Single source of truth for the availability verdict.
+ * Returns BOTH the per-rule rows and the final boolean, so the checklist
+ * shown in the UI can never disagree with the verdict.
+ *
+ * Rules (unchanged):
+ *  AC1: 0 <= start < end <= 1440; start strictly after now.
+ *  AC2: duration <= 120 (120 allowed).
+ *  AC3: blocked room is rejected.
+ *  AC4: reject overlap; touching endpoints are not overlap.
+ *  AC5: never mutate room.bookings.
+ */
+export function evaluate(room: Room, start: number, end: number): Evaluation {
+  const checks: CheckRow[] = [];
 
+  // AC1a: time order + within-day bounds
+  const orderOk = start < end && start >= 0 && end <= 1440;
   checks.push({
     label: "Time order",
-    detail:
-      startRaw < endRaw
-        ? "Start is before end."
-        : "Start must be earlier than end.",
-    passed: startRaw < endRaw,
+    detail: orderOk ? "Start is before end, within 00:00–24:00." : "Start must be before end and within 00:00–24:00.",
+    passed: orderOk,
   });
 
-  checks.push({
-    label: "Within day",
-    detail:
-      startRaw >= 0 && endRaw <= 1440
-        ? "Request is within 00:00–24:00."
-        : "Request must fall between 00:00 and 24:00.",
-    passed: startRaw >= 0 && endRaw <= 1440,
-  });
-
+  // AC1b: strictly after now
+  const afterNow = start > NOW;
   checks.push({
     label: "After now",
-    detail:
-      startRaw > config.now
-        ? `Start is strictly after now (${minutesToTime(config.now)}).`
-        : `Start must be strictly after now (${minutesToTime(config.now)}).`,
-    passed: startRaw > config.now,
+    detail: afterNow
+      ? `Start is strictly after now (${minutesToTime(NOW)}).`
+      : `Start must be strictly after now (${minutesToTime(NOW)}).`,
+    passed: afterNow,
   });
 
-  const duration = endRaw - startRaw;
+  // AC2: duration cap
+  const duration = end - start;
+  const durationOk = duration <= MAX_DURATION;
   checks.push({
     label: "Duration",
-    detail:
-      duration <= config.maxDuration
-        ? `Duration is ${duration} min (limit ${config.maxDuration} min).`
-        : `Duration is ${duration} min, exceeds ${config.maxDuration} min.`,
-    passed: duration <= config.maxDuration,
+    detail: durationOk
+      ? `Duration is ${duration} min (limit ${MAX_DURATION} min).`
+      : `Duration is ${duration} min, exceeds ${MAX_DURATION} min.`,
+    passed: durationOk,
   });
 
+  // AC3: blocked
   checks.push({
-    label: "Room blocked",
-    detail: config.blocked
-      ? "Room is currently blocked."
-      : "Room is not blocked.",
-    passed: !config.blocked,
+    label: "Room not blocked",
+    detail: room.blocked ? "Room is currently blocked." : "Room is not blocked.",
+    passed: !room.blocked,
   });
 
-  const candidate = { start: startRaw, end: endRaw };
-  const conflicting = config.existingBookings.filter((b) =>
-    isOverlap(candidate, b),
+  // AC4: no overlap with existing bookings (AC5: never mutate room.bookings)
+  const conflicting = room.bookings.filter(([bStart, bEnd]) =>
+    isOverlap(start, end, bStart, bEnd),
   );
   checks.push({
     label: "No conflicts",
@@ -100,32 +95,23 @@ export function checkAvailability(
     passed: conflicting.length === 0,
   });
 
-  const hardPassed =
-    startRaw >= 0 &&
-    startRaw < endRaw &&
-    endRaw <= 1440 &&
-    startRaw > config.now;
+  // Verive = all checks pass. Computed from the rows so they can't disagree.
+  const verdict = checks.every((c) => c.passed);
 
-  const available =
-    hardPassed &&
-    duration <= config.maxDuration &&
-    !config.blocked &&
-    conflicting.length === 0;
-
-  let reason = "";
-  if (available) {
-    reason = "Room is available for your requested time.";
-  } else if (config.blocked) {
-    reason = "Room is blocked and cannot accept bookings right now.";
-  } else if (!hardPassed) {
+  let reason: string;
+  if (verdict) {
+    reason = `${room.name} is available for your requested time.`;
+  } else if (room.blocked) {
+    reason = `${room.name} is blocked and cannot accept bookings right now.`;
+  } else if (!orderOk) {
     reason = "Fix the time inputs and try again.";
-  } else if (duration > config.maxDuration) {
-    reason = `Requested duration (${duration} min) exceeds the ${config.maxDuration}-minute limit.`;
-  } else if (conflicting.length > 0) {
-    reason = `Requested time overlaps ${conflicting.length} existing booking(s).`;
+  } else if (!afterNow) {
+    reason = `Start must be strictly after now (${minutesToTime(NOW)}).`;
+  } else if (!durationOk) {
+    reason = `Requested duration (${duration} min) exceeds the ${MAX_DURATION}-minute limit.`;
   } else {
-    reason = "Request is unavailable.";
+    reason = `Requested time overlaps ${conflicting.length} existing booking(s) in ${room.name}.`;
   }
 
-  return { available, reason, checks };
+  return { verdict, reason, checks };
 }
